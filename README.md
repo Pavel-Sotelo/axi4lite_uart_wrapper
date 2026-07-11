@@ -182,18 +182,6 @@ From TC7, the clearest view of the RX buffering behavior. `CAPTURED_RX_BYTE` tra
 
 ---
 
-## Timing (post-implementation)
-
-![Design timing summary](docs/timing_design_summary.png)
-
-All user-specified timing constraints are met: WNS = **+6.107 ns**, WHS = **+0.154 ns**, WPWS = **+4.500 ns**, with 0 failing endpoints out of 187 (setup/hold) and 101 (pulse width). At the 100 MHz (10 ns) constraint this gives **Fmax ≈ 257 MHz** (1 / (10 − 6.107) ns).
-
-![Intra-clock critical paths](docs/timing_critical_paths.png)
-
-The critical path (Path 1, slack 6.107 ns) runs from the **FSM state register** (`FSM_sequential_state_reg[0]/C`) to the **`RRESP` register** (`RRESP_reg[1]/R`) — the read-response decode. Total delay is 3.404 ns, dominated by net delay (2.700 ns) over logic delay (0.704 ns), which is typical for a small design where routing, not logic depth, sets the path. The next cluster of paths (slack ~6.19 ns) all target the `RDATA` register bits, confirming the read-response path is where the design is tightest — consistent with READ being the state that latches the entire read response in one cycle.
-
----
-
 ## Bugs Found and Fixed
 
 ### Bug 1: Uninitialized inputs poisoned `state`
