@@ -65,6 +65,7 @@ module tb_axi4lite_wrapper_uart();
         .RVALID(RVALID),
         .RREADY(RREADY),
         
+        //NOTE: rx is fed by TX loopback, The rx reg below is intentionally unconnected in this loopback testbench
         .rx(tx),
         .tx(tx)    
 
@@ -264,15 +265,38 @@ module tb_axi4lite_wrapper_uart();
             
         check_p_captured_done_low: assert property (p_captured_done_low)     
             else $display ("SVA 6 failed: When current state is READ_RESP and read address is RX_DATA, CAPTURED_DONE is not LOW after RREADY (time: %0t)", $time);                                            
-            
-    
+
+
+        //SVA 7: overrun sets HIGH when a new byte arrives (done_rising) while one is already captured and unread (CAPTURED_DONE == 1)
+
+        property p_overrun_set;
+            @(posedge clk) disable iff (reset)
+            (DUT.done_rising && DUT.CAPTURED_DONE) |=> (DUT.overrun == 1'b1);
+        endproperty
+
+        check_p_overrun_set: assert property (p_overrun_set)
+            else $display ("SVA 7 failed: overrun did not set when a byte arrived while one was still unread (time: %0t)", $time);
+
+
+        //SVA 8: oldest held,  when a byte is dropped (done_rising while CAPTURED_DONE == 1), the already captured byte must not change
+
+        property p_oldest_held;
+            @(posedge clk) disable iff (reset)
+            (DUT.done_rising && DUT.CAPTURED_DONE) |=> $stable(DUT.CAPTURED_RX_BYTE);
+        endproperty
+
+        check_p_oldest_held: assert property (p_oldest_held)
+            else $display ("SVA 8 failed: captured byte changed on overrun - not holding the oldest byte (time: %0t)", $time);
+
+    //End of SVA's
+   
     initial begin
     
         //initialize DUT inputs (to avoid don't cares)
         AWVALID = 0; WVALID = 0; BREADY = 0;
         ARVALID = 0; RREADY = 0;
         AWADDR = 0; WDATA = 0; ARADDR = 0;
-        rx = 1;   //rx in idle is high for UART
+        rx = 1;   //rx in idle is high for UART (note: unconnected in loopback TB, see DUT instantiation)
  
     /*
         Corner cases to cover:
@@ -283,7 +307,8 @@ module tb_axi4lite_wrapper_uart();
             4.Normal STATUS read: Master reads STATUS, tx_busy should be HIGH because a byte was transmitted a few cycles before (TC2), done should be LOW
             5.Normal RX_DATA read: after the loopback byte from TC2 is fully received (wait for done), Master reads RX_DATA and it should be the sent byte (112 decimal)
             6.Read RX_DATA cleared: after reading the byte from past TC5, CAPTURED_DONE should be LOW, confirming the read cleared it and no new byte re-raised it, or another signal re-raised it
-     
+            7.Overrun: a byte is captured and unread, then a second byte arrives (forced done_rising), the second one is dropped, overrun goes HIGH, and reading RX_DATA returns the oldest byte
+
     */
     
         $display("");
@@ -338,9 +363,10 @@ module tb_axi4lite_wrapper_uart();
         $display("TC4 begins. (normal STATUS read adress)");           
     
         //tx_busy should be HIGH because we previously write a byte a few cycles before (TC2)
+        //STATUS = {29'd0, overrun, CAPTURED_DONE, tx_busy}. Here: tx_busy=1, done=0, overrun=0 -> 3'b001
         
         axi_read (4'h8);
-        check ("RDATA (status) is 01 after read", RDATA, 1'b01);
+        check ("RDATA (status) is 001: tx_busy=1, done=0, overrun=0", RDATA, 32'd1);
         
         $display("TC4 finished.");
         
@@ -364,10 +390,62 @@ module tb_axi4lite_wrapper_uart();
         $display("");
         $display("TC6 begins. (just checks if CAPTURED_DONE is LOW after we read the last byte and we didnt send another one)");
         
+        //STATUS now: tx_busy=0 (transmit long done), done=0 (cleared by TC5 read), overrun=0 -> all zero
         axi_read (4'h8);
-        check ("RDATA (status) is 00 (no done and busy)", RDATA, 1'b00);
+        check ("RDATA (status) is 000 (no busy, no done, no overrun)", RDATA, 32'd0);
+        check ("overrun bit is LOW (no drop occurred)", DUT.overrun, 0);
         
         $display("TC6 finished.");        
+
+        repeat (3) @(posedge clk);
+        #1;
+
+        $display("");
+        $display("TC7 begins. (overrun: a second byte arrives while the first is still unread, we should keep the oldest)");
+
+        //first we send a byte (200 decimal) and wait until its captured and unread
+        axi_write (4'h0, 8'd200);
+        wait (DUT.CAPTURED_DONE == 1);
+        
+        @(posedge clk);
+        #1;
+        
+        check ("first byte (200) is captured and unread", DUT.CAPTURED_RX_BYTE, 8'd200);
+        check ("overrun is still LOW before the second byte", DUT.overrun, 0);
+
+        //now we force a second byte (55 decimal) into the rx submodule while the first is unread, so done_rising fires again
+        @(posedge clk);
+        #1;
+        
+        force DUT.DUT_RX.done    = 1'b0;
+        force DUT.DUT_RX.rx_byte = 8'd55;
+        
+        @(posedge clk);
+        #1;
+        
+        force DUT.DUT_RX.done    = 1'b1;   //0 to 1 edge makes done_rising HIGH
+        
+        @(posedge clk);
+        #1;
+
+        check ("overrun is HIGH after the second byte is dropped", DUT.overrun, 1);
+        check ("captured byte is STILL the first one (200), the second (55) was dropped", DUT.CAPTURED_RX_BYTE, 8'd200);
+
+        //release the forces so the rx submodule works normal again
+        release DUT.DUT_RX.done;
+        release DUT.DUT_RX.rx_byte;
+
+        //Master reads RX_DATA, it should be the OLDEST byte (200), not the dropped one (55)
+        axi_read (4'h4);
+        check ("RDATA (rx_byte) is the oldest byte 200 decimal, not the dropped 55", RDATA, 8'd200);
+
+        @(posedge clk);
+        #1;
+        
+        check ("overrun is LOW after RX_DATA read", DUT.overrun, 0);
+        check ("CAPTURED_DONE is LOW after RX_DATA read", DUT.CAPTURED_DONE, 0);
+
+        $display("TC7 finished.");
         $display("");
         $display("End of AXI4LITE WRAPPER UART Testbench.");
         $display("");        
@@ -377,3 +455,4 @@ module tb_axi4lite_wrapper_uart();
 
 
 endmodule
+ 

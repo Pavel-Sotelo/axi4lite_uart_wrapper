@@ -80,6 +80,7 @@ module axi4lite_wrapper_uart #(
     //signal to store the previous done signal (to detect 01 in done)
     logic done_prev;
     logic done_rising; //as well to store the 01 detection of done
+    logic overrun; //flag to detect when another byte or multiple ones arrived (but we only are going to read the oldest one)
 
     //FSM
 
@@ -180,6 +181,7 @@ module axi4lite_wrapper_uart #(
         end
     end   
  
+    //capture the done "01" raise
     always_ff @(posedge clk) begin
     
         if(reset)
@@ -197,16 +199,22 @@ module axi4lite_wrapper_uart #(
         if(reset) begin
         
             CAPTURED_RX_BYTE <= 8'd0;
-            CAPTURED_DONE <= 1'd0;                
+            CAPTURED_DONE <= 1'd0;
+            overrun <= 1'b0;                
                     
-        end else if(done_rising) begin
+        end else if(done_rising && ~CAPTURED_DONE) begin
         
             CAPTURED_RX_BYTE <= rx_byte;
             CAPTURED_DONE <= 1'd1;
             
+        end else if(done_rising && CAPTURED_DONE) begin
+        
+            overrun <= 1'b1;           
+            
         end else if (state == READ_RESP && RREADY && CAPTURED_ARADDR == RX_DATA) begin
         
-            CAPTURED_DONE <= 1'd0;    
+            CAPTURED_DONE <= 1'd0;
+            overrun <= 1'b0;     
         
         end
         
@@ -232,7 +240,7 @@ module axi4lite_wrapper_uart #(
                  
             end else if(CAPTURED_ARADDR == STATUS) begin
             
-                RDATA <= {30'd0 , CAPTURED_DONE, tx_busy};        
+                RDATA <= {29'd0, overrun, CAPTURED_DONE, tx_busy};        
                 RVALID <= 1'b1;
                 RRESP <= 2'b00;           
             
