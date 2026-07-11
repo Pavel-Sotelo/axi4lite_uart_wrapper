@@ -148,35 +148,35 @@ TC5 is the end-to-end proof: `tx` is wired to `rx`, so a byte written over AXI t
 
 ## Waveforms
 
-Take these five captures from the behavioral simulation. Signal groups assume the DUT hierarchy `DUT.*` plus the top-level AXI ports.
+Five captures from the behavioral simulation, showing the key transactions and design decisions.
 
 **1. Write transaction — normal (OKAY):**
 
-*TC2.* Show `clk`, `state`, `tx_start`, `AWADDR`, `AWVALID`, `AWREADY`, `WDATA`, `WVALID`, `WREADY`, `BVALID`, `BRESP`, `BREADY`. `state` steps 0→1→2 (IDLE→WRITE→WRITE_RESP); the AW/W handshakes complete into WRITE; `tx_start` pulses once; `WDATA = 112` loads; `BRESP = 0` (OKAY); and `BVALID` is held until `BREADY` completes the response.
+From TC2. `state` steps through 0→1→2 (IDLE→WRITE→WRITE_RESP). The AW and W handshakes complete into WRITE, `tx_start` pulses once, `WDATA = 112` loads, `BRESP = 0` (OKAY), and `BVALID` is held until `BREADY` completes the response.
 
 ![Write OKAY](docs/waveform_write_okay.png)
 
 **2. Write transaction — bad address (SLVERR):**
 
-*TC3.* Same signal group as above. The key contrast: `AWADDR = 0x04` (unmapped write) with `WDATA = 243`, `tx_start` never pulses, and `BRESP = 2` (SLVERR). Placed next to capture 1, it shows the wrapper rejecting a bad address instead of transmitting.
+From TC3, the same signals as capture 1. Here the master targets `AWADDR = 0x04` (an unmapped write address) with `WDATA = 243`. `tx_start` never pulses and `BRESP = 2` (SLVERR) — the wrapper rejects the bad address instead of transmitting. Placed next to capture 1, the contrast is clear.
 
 ![Write SLVERR](docs/waveform_write_slverr.png)
 
 **3. `tx_start` is exactly one cycle wide:**
 
-*TC2, zoomed on the WRITE→WRITE_RESP transition.* Show `clk`, `state`, `tx_start`, zoomed so individual clock edges are visible. `tx_start` is high for exactly one clock period while `state = 1` (WRITE), then drops as the FSM enters `state = 2` (WRITE_RESP). This is the direct proof of why WRITE is its own state — the pulse lasts one cycle even though the response wait that follows can take many. It's the write-side analogue of the read-side "latch once, then hold" argument.
+A zoom on the WRITE→WRITE_RESP transition in TC2, with individual clock edges visible. `tx_start` is high for exactly one clock period while `state = 1` (WRITE), then drops as the FSM enters `state = 2` (WRITE_RESP). This is the direct proof of why WRITE is its own state — the pulse lasts one cycle even though the response wait that follows can take many. It is the write-side analogue of the read-side "latch once, then hold" behavior.
 
 ![tx_start one cycle](docs/waveform_tx_start_one_cycle.png)
 
 **4. Two reads back-to-back — STATUS then loopback RX_DATA:**
 
-*TC4 into TC5.* Show `clk`, `state`, `ARADDR`, `ARVALID`, `ARREADY`, `RVALID`, `RRESP`, `RREADY`, `CAPTURED_RX_BYTE`, `RDATA`, `CAPTURED_DONE`. Two full read transactions are visible, each cycling `state` through 0→3→4 (IDLE→READ→READ_RESP): first `ARADDR = 0x08` (STATUS, `RDATA = 1` — `tx_busy` still high from the earlier write), then `ARADDR = 0x04` (RX_DATA, `RDATA = 112`). `CAPTURED_RX_BYTE` holds `112` across both. This is the clearest proof of the whole path *and* the read FSM: a byte written over AXI has transmitted serially, looped back through `rx`, been received into `CAPTURED_RX_BYTE`, and is read back over AXI with the correct value — and you can see READ latch the response one cycle before READ_RESP holds it through the handshake.
+TC4 into TC5. Two full read transactions are visible, each cycling `state` through 0→3→4 (IDLE→READ→READ_RESP). The first reads `ARADDR = 0x08` (STATUS) and returns `RDATA = 1` — `tx_busy` still high from the earlier write. The second reads `ARADDR = 0x04` (RX_DATA) and returns `RDATA = 112`. `CAPTURED_RX_BYTE` holds `112` across both. This is the clearest proof of the whole path *and* the read FSM: a byte written over AXI has transmitted serially, looped back through `rx`, been received into `CAPTURED_RX_BYTE`, and is read back over AXI with the correct value — and READ latches the response one cycle before READ_RESP holds it through the handshake.
 
 ![Two reads: STATUS then RX_DATA](docs/waveform_reads_status_rxdata.png)
 
 **5. Overrun — oldest byte held, new byte dropped:**
 
-*During TC7.* Show `clk`, `state`, `ARADDR`, `RVALID`, `RREADY`, `CAPTURED_RX_BYTE`, `RDATA`, `CAPTURED_DONE`, `overrun`, `done_rising`, `done_prev`. This is the money shot for the RX policy: `CAPTURED_RX_BYTE` transitions `112 → 200` when the first byte is captured, then **holds at 200** for the rest of the window; a second `done_rising` pulse arrives while `CAPTURED_DONE` is already high; `overrun` goes high; `CAPTURED_RX_BYTE` does **not** change to `55` (the dropped byte); and the following RX_DATA read drives `RDATA = 200` and clears `CAPTURED_DONE` and `overrun`. If you can only add one new waveform to the repo, add this one — it's the visual statement of the entire RX-buffering design decision.
+From TC7, the clearest view of the RX buffering behavior. `CAPTURED_RX_BYTE` transitions `112 → 200` when the first byte is captured, then holds at `200` for the rest of the window. A second `done_rising` pulse arrives while `CAPTURED_DONE` is already high; `overrun` goes high; and `CAPTURED_RX_BYTE` does **not** change to `55` (the dropped byte). The following RX_DATA read drives `RDATA = 200` and clears `CAPTURED_DONE` and `overrun`. This single waveform captures the entire RX-buffering design decision: the oldest byte survives, the new one is dropped, and the drop is flagged rather than silent.
 
 ![Overrun oldest held](docs/waveform_overrun_oldest_held.png)
 
